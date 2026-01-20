@@ -6,27 +6,105 @@ namespace AsyncWorker.Services;
 
 public class JobExecutionService
 {
-    private readonly ApplicationDbContext _context;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly JobConcurrencyManager _concurrencyManager;
     private readonly ProcessInstanceManager _processManager;
     private readonly ILogger<JobExecutionService> _logger;
 
     public JobExecutionService(
-        ApplicationDbContext context,
+        IServiceScopeFactory scopeFactory,
         JobConcurrencyManager concurrencyManager,
         ProcessInstanceManager processManager,
         ILogger<JobExecutionService> logger)
     {
-        _context = context;
+        _scopeFactory = scopeFactory;
         _concurrencyManager = concurrencyManager;
         _processManager = processManager;
         _logger = logger;
     }
 
-    // 메인 실행 메서드
-    public async Task ExecuteJobAsync(Guid jobId, CancellationToken cancellationToken)
+    // 작업 생성 및 백그라운드 실행 시작
+    public async Task<Job> CreateAndExecuteJobAsync(string jobType, string? payload)
     {
-        var job = await _context.Jobs.FindAsync(new object[] { jobId }, cancellationToken);
+        // 작업 타입 유효성 검사
+        var config = _concurrencyManager.GetConfiguration(jobType);
+        if (config == null)
+        {
+            throw new InvalidOperationException($"Unknown job type: {jobType}");
+        }
+
+        Job job;
+        
+        // Scoped DbContext로 작업 생성
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            
+            job = new Job
+            {
+                Id = Guid.NewGuid(),
+                Type = jobType,
+                Payload = payload,
+                Status = JobStatus.Pending,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            context.Jobs.Add(job);
+            await context.SaveChangesAsync();
+            
+            _logger.LogInformation("Created job {JobId} ({JobType})", job.Id, job.Type);
+        }
+
+        // Fire-and-forget: 백그라운드 Task 실행
+        _ = Task.Run(async () =>
+        {
+            await ExecuteJobAsync(job.Id, CancellationToken.None);
+        });
+
+        return job;
+    }
+
+    // 작업 취소
+    public bool CancelJob(Guid jobId)
+    {
+        var cancelled = _concurrencyManager.CancelJob(jobId);
+        
+        if (cancelled)
+        {
+            _logger.LogInformation("Job {JobId} cancellation requested", jobId);
+        }
+        
+        return cancelled;
+    }
+
+    // 작업 취소 (실행 전 작업)
+    public async Task<bool> CancelPendingJobAsync(Guid jobId)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        
+        var job = await context.Jobs.FindAsync(jobId);
+        if (job == null || job.Status != JobStatus.Pending)
+        {
+            return false;
+        }
+
+        job.Status = JobStatus.Cancelled;
+        job.CompletedAt = DateTime.UtcNow;
+        job.ErrorMessage = "Cancelled by user before execution";
+        await context.SaveChangesAsync();
+        
+        _logger.LogInformation("Job {JobId} cancelled before execution", jobId);
+        return true;
+    }
+
+    // 메인 실행 메서드 (내부용)
+    private async Task ExecuteJobAsync(Guid jobId, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        
+        var job = await context.Jobs.FindAsync(new object[] { jobId }, cancellationToken);
         if (job == null)
         {
             _logger.LogWarning("Job {JobId} not found", jobId);
@@ -40,7 +118,7 @@ public class JobExecutionService
             job.Status = JobStatus.Failed;
             job.ErrorMessage = $"Unknown job type: {job.Type}";
             job.CompletedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync(CancellationToken.None);
+            await context.SaveChangesAsync(CancellationToken.None);
             return;
         }
 
@@ -61,7 +139,7 @@ public class JobExecutionService
             job.Status = JobStatus.InProgress;
             job.StartedAt = DateTime.UtcNow;
             job.ProcessInstanceId = _processManager.CurrentInstanceId;
-            await _context.SaveChangesAsync(linkedCts.Token);
+            await context.SaveChangesAsync(linkedCts.Token);
 
             // 실제 작업 실행 (Task.Delay로 시뮬레이션)
             await Task.Delay(config.DelayMilliseconds, linkedCts.Token);
@@ -87,7 +165,7 @@ public class JobExecutionService
         }
         finally
         {
-            await _context.SaveChangesAsync(CancellationToken.None);
+            await context.SaveChangesAsync(CancellationToken.None);
             _concurrencyManager.Release(job.Type);
             _concurrencyManager.UnregisterJob(jobId);
             linkedCts.Dispose();

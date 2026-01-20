@@ -12,20 +12,14 @@ namespace AsyncWorker.Controllers;
 public class JobsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
-    private readonly IServiceScopeFactory _scopeFactory;
-    private readonly JobConcurrencyManager _concurrencyManager;
-    private readonly ILogger<JobsController> _logger;
+    private readonly JobExecutionService _executionService;
 
     public JobsController(
         ApplicationDbContext context,
-        IServiceScopeFactory scopeFactory,
-        JobConcurrencyManager concurrencyManager,
-        ILogger<JobsController> logger)
+        JobExecutionService executionService)
     {
         _context = context;
-        _scopeFactory = scopeFactory;
-        _concurrencyManager = concurrencyManager;
-        _logger = logger;
+        _executionService = executionService;
     }
 
     // POST /api/jobs - 작업 생성
@@ -38,36 +32,15 @@ public class JobsController : ControllerBase
             return BadRequest(new { Message = "Job type is required" });
         }
 
-        // 작업 타입이 설정에 존재하는지 확인
-        var config = _concurrencyManager.GetConfiguration(request.Type);
-        if (config == null)
+        try
         {
-            return BadRequest(new { Message = $"Unknown job type: {request.Type}" });
+            var job = await _executionService.CreateAndExecuteJobAsync(request.Type, request.Payload);
+            return AcceptedAtAction(nameof(GetJob), new { id = job.Id }, new JobResponse(job));
         }
-
-        var job = new Job
+        catch (InvalidOperationException ex)
         {
-            Id = Guid.NewGuid(),
-            Type = request.Type,
-            Payload = request.Payload,
-            Status = JobStatus.Pending,
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _context.Jobs.Add(job);
-        await _context.SaveChangesAsync();
-
-        _logger.LogInformation("Created job {JobId} ({JobType})", job.Id, job.Type);
-
-        // Fire-and-forget: 백그라운드 Task 실행
-        _ = Task.Run(async () =>
-        {
-            using var scope = _scopeFactory.CreateScope();
-            var executionService = scope.ServiceProvider.GetRequiredService<JobExecutionService>();
-            await executionService.ExecuteJobAsync(job.Id, CancellationToken.None);
-        });
-
-        return AcceptedAtAction(nameof(GetJob), new { id = job.Id }, new JobResponse(job));
+            return BadRequest(new { Message = ex.Message });
+        }
     }
 
     // GET /api/jobs/{id} - 작업 조회
@@ -138,21 +111,13 @@ public class JobsController : ControllerBase
             return BadRequest(new { Message = $"Cannot cancel job in {job.Status} state" });
         }
 
-        // CancellationToken 트리거
-        var cancelled = _concurrencyManager.CancelJob(id);
+        // 실행 중인 작업 취소 시도
+        var cancelled = _executionService.CancelJob(id);
 
+        // 취소가 안되었고 Pending 상태라면 직접 취소
         if (!cancelled && job.Status == JobStatus.Pending)
         {
-            // 아직 실행 전이면 DB에서 직접 취소
-            job.Status = JobStatus.Cancelled;
-            job.CompletedAt = DateTime.UtcNow;
-            job.ErrorMessage = "Cancelled by user before execution";
-            await _context.SaveChangesAsync();
-            _logger.LogInformation("Job {JobId} cancelled before execution", id);
-        }
-        else
-        {
-            _logger.LogInformation("Job {JobId} cancellation requested", id);
+            await _executionService.CancelPendingJobAsync(id);
         }
 
         return Ok(new { Message = "Cancellation requested", JobId = id });

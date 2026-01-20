@@ -20,11 +20,6 @@ ASP.NET Core 10과 SQLite를 사용하여 구현한 비동기 작업 관리 시�
 - 실행 전/실행 중 작업 모두 취소 가능
 - CancellationTokenSource를 Dictionary로 관리
 
-### 4. 프로세스 장애 복구
-- 앱 시작 시 고유 ProcessInstanceId (UUID) 생성
-- InProgress 상태의 orphaned 작업 자동 감지
-- 이전 프로세스의 작업을 Failed로 자동 처리
-
 ## 기술 스택
 
 - **.NET 10** - 최신 .NET 버전
@@ -38,7 +33,7 @@ ASP.NET Core 10과 SQLite를 사용하여 구현한 비동기 작업 관리 시�
 ```
 AsyncWorker/
 ├── Controllers/
-│   ├── JobsController.cs          # 작업 CRUD API
+│   ├── JobsController.cs          # 작업 API (전달 역할만)
 │   └── StatusController.cs        # 시스템 상태 API
 ├── Data/
 │   └── ApplicationDbContext.cs    # EF Core DbContext
@@ -52,12 +47,38 @@ AsyncWorker/
 ├── Services/
 │   ├── ProcessInstanceManager.cs  # 프로세스 UUID 관리 (Singleton)
 │   ├── JobConcurrencyManager.cs   # 동시성 제어 (Singleton)
-│   ├── JobExecutionService.cs     # 작업 실행 로직 (Scoped)
-│   └── JobRecoveryService.cs      # 시작 시 복구 (IHostedService)
+│   └── JobExecutionService.cs     # 작업 관리 및 실행 (Singleton)
 ├── Migrations/                    # EF Core 마이그레이션
 ├── appsettings.json               # 설정 파일
 └── Program.cs                     # DI 및 앱 설정
 ```
+
+## 아키텍처 설계
+
+### 핵심 서비스 역할
+
+#### 1. JobsController (전달 역할만)
+- API 요청 받기
+- 간단한 유효성 검사
+- JobExecutionService로 요청 전달
+- 응답 반환
+
+#### 2. JobExecutionService (Singleton - 핵심 관리자)
+- 작업 생성 및 DB 저장
+- 백그라운드 Task 실행 시작
+- 작업 실행 전체 프로세스 관리
+- 세마포어 획득/해제
+- 작업 상태 업데이트
+- 작업 취소 처리
+
+#### 3. JobConcurrencyManager (Singleton)
+- 타입별 SemaphoreSlim 관리
+- CancellationTokenSource Dictionary 관리
+- 동시성 슬롯 정보 제공
+
+#### 4. ProcessInstanceManager (Singleton)
+- 앱 시작 시 고유 UUID 생성
+- 프로세스 인스턴스 식별
 
 ## 시작하기
 
@@ -198,30 +219,37 @@ curl https://localhost:5001/api/status/summary
 [Client Request] 
     ↓
 [JobsController.CreateJob]
+    ↓ - 요청 받기
+    ↓ - 유효성 검사
+    ↓
+[JobExecutionService.CreateAndExecuteJobAsync]
     ↓ 1. Job 엔티티 생성 (Pending)
     ↓ 2. DB 저장
-    ↓ 3. Task.Run으로 백그라운드 실행
-    ↓ 4. 202 Accepted 응답
+    ↓ 3. Task.Run으로 백그라운드 실행 시작
+    ↓ 4. Job 객체 반환
+    ↓
+[JobsController] → 202 Accepted 응답
     ↓
 [JobExecutionService.ExecuteJobAsync] (별도 Task)
-    ↓ 1. 타입별 SemaphoreSlim 획득 대기
-    ↓ 2. 획득 성공 → InProgress 업데이트
-    ↓ 3. ProcessInstanceId 기록
-    ↓ 4. Task.Delay 실행
-    ↓ 5. Completed 처리
-    ↓ 6. SemaphoreSlim 해제
+    ↓ 1. Scoped DbContext 생성
+    ↓ 2. 타입별 SemaphoreSlim 획득 대기
+    ↓ 3. 획득 성공 → InProgress 업데이트
+    ↓ 4. ProcessInstanceId 기록
+    ↓ 5. Task.Delay 실행
+    ↓ 6. Completed 처리
+    ↓ 7. SemaphoreSlim 해제
 ```
 
-### 프로세스 장애 복구
+### 서비스 계층 구조
 
 ```
-[App Startup]
+Controller Layer (전달)
     ↓
-[JobRecoveryService.StartAsync]
-    ↓ 1. 현재 프로세스 UUID 생성
-    ↓ 2. InProgress 작업 중 다른 UUID 검색
-    ↓ 3. 해당 작업들을 Failed로 변경
-    ↓ 4. ErrorMessage에 이전 프로세스 정보 기록
+JobExecutionService (Singleton - 핵심 관리)
+    ↓
+    ├─→ JobConcurrencyManager (동시성 제어)
+    ├─→ ProcessInstanceManager (프로세스 식별)
+    └─→ IServiceScopeFactory (Scoped DbContext)
 ```
 
 ## 테스트 시나리오
@@ -241,15 +269,10 @@ curl https://localhost:5001/api/status/summary
 2. 즉시 취소 요청
 3. 작업 상태 확인 → Cancelled
 
-### 4. 프로세스 장애 테스트
-1. DataProcessJob 생성
-2. 실행 중 앱 강제 종료 (Ctrl+C)
-3. 앱 재시작
-4. 해당 작업 상태 확인 → Failed
-
 ## 장점
 
 - ✅ **간단한 설정**: 외부 인프라 불필요
+- ✅ **명확한 책임 분리**: Controller는 전달만, ExecutionService가 모든 로직 처리
 - ✅ **디버깅 용이**: 모든 로직이 코드베이스 내부에 존재
 - ✅ **낮은 복잡도**: 학습 곡선이 낮음
 - ✅ **빠른 개발**: 프로토타입 및 MVP에 적합
@@ -258,7 +281,7 @@ curl https://localhost:5001/api/status/summary
 
 - ❌ **단일 서버만 지원**: 수평 확장 불가
 - ❌ **메모리 기반 세마포어**: 재시작 시 초기화
-- ❌ **Pending 작업 복구 불가**: 자동 재시작 미지원
+- ❌ **프로세스 장애 시 복구 불가**: InProgress 작업 유실
 
 ## 언제 사용해야 하나?
 
@@ -283,10 +306,12 @@ curl https://localhost:5001/api/status/summary
 ### Hangfire/Quartz.NET으로 마이그레이션
 - 대시보드 UI 제공
 - 스케줄링 기능 추가
+- 자동 복구 기능
 
 ### 메시지 큐 도입
 - RabbitMQ, Azure Service Bus, Kafka 등
 - 완전한 분산 환경 지원
+- 작업 영속성 보장
 
 ## 라이선스
 

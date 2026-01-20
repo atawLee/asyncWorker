@@ -11,12 +11,7 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 // Singleton Services
 builder.Services.AddSingleton<ProcessInstanceManager>();
 builder.Services.AddSingleton<JobConcurrencyManager>();
-
-// Scoped Services
-builder.Services.AddScoped<JobExecutionService>();
-
-// Hosted Services
-builder.Services.AddHostedService<JobRecoveryService>();
+builder.Services.AddSingleton<JobExecutionService>();
 
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
