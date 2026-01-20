@@ -1,21 +1,23 @@
 # AsyncWorker - 카프카 없이 비동기 작업 관리 시스템
 
-ASP.NET Core 10과 SQLite를 사용하여 구현한 비동기 작업 관리 시스템입니다. 
+ASP.NET Core 10과 SQLite를 사용하여 구현한 비동기 작업 관리 시스템입니다.
 외부 메시지 큐(Kafka, RabbitMQ 등) 없이 간단하고 효율적인 비동기 작업 처리를 제공합니다.
 
 ## 주요 기능
 
 ### 1. Fire-and-Forget 패턴
-- API 요청 시 즉시 202 Accepted 응답
-- 백그라운드에서 Task.Run으로 독립적인 작업 실행
+
+- 백그라운드에서 Task로 독립적인 작업 실행
 - 각 작업은 DB에 상태 저장
 
 ### 2. 타입별 동시성 제어
+
 - 작업 타입별로 최대 동시 실행 수 제한
 - `SemaphoreSlim`을 사용한 경량 동시성 관리
 - 설정 파일(appsettings.json)로 타입별 동시성 제어
 
 ### 3. 작업 취소
+
 - CancellationToken 기반 작업 취소
 - 실행 전/실행 중 작업 모두 취소 가능
 - CancellationTokenSource를 Dictionary로 관리
@@ -58,12 +60,14 @@ AsyncWorker/
 ### 핵심 서비스 역할
 
 #### 1. JobsController (전달 역할만)
+
 - API 요청 받기
 - 간단한 유효성 검사
 - JobExecutionService로 요청 전달
 - 응답 반환
 
 #### 2. JobExecutionService (Singleton - 핵심 관리자)
+
 - 작업 생성 및 DB 저장
 - 백그라운드 Task 실행 시작
 - 작업 실행 전체 프로세스 관리
@@ -72,11 +76,13 @@ AsyncWorker/
 - 작업 취소 처리
 
 #### 3. JobConcurrencyManager (Singleton)
+
 - 타입별 SemaphoreSlim 관리
 - CancellationTokenSource Dictionary 관리
 - 동시성 슬롯 정보 제공
 
 #### 4. ProcessInstanceManager (Singleton)
+
 - 앱 시작 시 고유 UUID 생성
 - 프로세스 인스턴스 식별
 
@@ -117,6 +123,7 @@ curl -X POST https://localhost:5001/api/jobs \
 ```
 
 **응답:**
+
 ```json
 {
   "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -133,6 +140,7 @@ curl https://localhost:5001/api/jobs/{jobId}
 ```
 
 **응답:**
+
 ```json
 {
   "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -216,7 +224,7 @@ curl https://localhost:5001/api/status/summary
 ### 작업 실행 흐름
 
 ```
-[Client Request] 
+[Client Request]
     ↓
 [JobsController.CreateJob]
     ↓ - 요청 받기
@@ -255,16 +263,19 @@ JobExecutionService (Singleton - 핵심 관리)
 ## 테스트 시나리오
 
 ### 1. 정상 작업 흐름 테스트
+
 1. EmailJob 작업 생성
 2. 5초 대기
 3. 작업 상태 확인 → Completed
 
 ### 2. 동시성 제한 테스트
+
 1. EmailJob 10개 동시 생성
 2. 동시성 상태 확인 → InUse: 3, Available: 0
 3. 작업 완료 대기 후 확인
 
 ### 3. 작업 취소 테스트
+
 1. ReportJob 생성 (15초 소요)
 2. 즉시 취소 요청
 3. 작업 상태 확인 → Cancelled
@@ -286,12 +297,14 @@ JobExecutionService (Singleton - 핵심 관리)
 ## 언제 사용해야 하나?
 
 ### 적합한 경우
+
 - 중소규모 애플리케이션
 - 단일 서버 환경
 - 간단한 비동기 작업 처리 필요
 - 외부 인프라 비용 절감 필요
 
 ### 부적합한 경우
+
 - 대규모 트래픽
 - 다중 서버 환경 (로드 밸런싱)
 - 작업 영속성 및 보장된 전달 필요
@@ -300,15 +313,18 @@ JobExecutionService (Singleton - 핵심 관리)
 ## 확장 가능성
 
 ### Redis 분산 락으로 업그레이드
+
 - SemaphoreSlim → RedLock
 - 다중 서버 환경 지원
 
 ### Hangfire/Quartz.NET으로 마이그레이션
+
 - 대시보드 UI 제공
 - 스케줄링 기능 추가
 - 자동 복구 기능
 
 ### 메시지 큐 도입
+
 - RabbitMQ, Azure Service Bus, Kafka 등
 - 완전한 분산 환경 지원
 - 작업 영속성 보장

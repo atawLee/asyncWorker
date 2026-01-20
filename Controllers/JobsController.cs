@@ -24,23 +24,15 @@ public class JobsController : ControllerBase
 
     // POST /api/jobs - 작업 생성
     [HttpPost]
-    public async Task<IActionResult> CreateJob([FromBody] CreateJobRequest request)
+    public async Task CreateJob([FromBody] CreateJobRequest request)
     {
         // 유효성 검사
         if (string.IsNullOrWhiteSpace(request.Type))
         {
-            return BadRequest(new { Message = "Job type is required" });
+            throw new ArgumentException("Job type is required");
         }
 
-        try
-        {
-            var job = await _executionService.CreateAndExecuteJobAsync(request.Type, request.Payload);
-            return AcceptedAtAction(nameof(GetJob), new { id = job.Id }, new JobResponse(job));
-        }
-        catch (InvalidOperationException ex)
-        {
-            return BadRequest(new { Message = ex.Message });
-        }
+        _ = _executionService.CreateAndExecuteJobAsync(request.Type, request.Payload);
     }
 
     // GET /api/jobs/{id} - 작업 조회
@@ -80,7 +72,7 @@ public class JobsController : ControllerBase
         }
 
         var totalCount = await query.CountAsync();
-        
+
         var jobs = await query
             .OrderByDescending(j => j.CreatedAt)
             .Skip((page - 1) * pageSize)

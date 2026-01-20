@@ -24,7 +24,7 @@ public class JobExecutionService
     }
 
     // 작업 생성 및 백그라운드 실행 시작
-    public async Task<Job> CreateAndExecuteJobAsync(string jobType, string? payload)
+    public async Task CreateAndExecuteJobAsync(string jobType, string? payload)
     {
         // 작업 타입 유효성 검사
         var config = _concurrencyManager.GetConfiguration(jobType);
@@ -33,47 +33,39 @@ public class JobExecutionService
             throw new InvalidOperationException($"Unknown job type: {jobType}");
         }
 
+        await ExecuteJobAsync(jobType, payload, CancellationToken.None);
+    }
+
+    private static async Task<Job> InsertNewJobAsync(string jobType, string? payload, IServiceScope scope)
+    {
         Job job;
-        
-        // Scoped DbContext로 작업 생성
-        using (var scope = _scopeFactory.CreateScope())
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        job = new Job
         {
-            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-            
-            job = new Job
-            {
-                Id = Guid.NewGuid(),
-                Type = jobType,
-                Payload = payload,
-                Status = JobStatus.Pending,
-                CreatedAt = DateTime.UtcNow
-            };
+            Id = Guid.NewGuid(),
+            Type = jobType,
+            Payload = payload,
+            Status = JobStatus.Pending,
+            CreatedAt = DateTime.UtcNow
+        };
 
-            context.Jobs.Add(job);
-            await context.SaveChangesAsync();
-            
-            _logger.LogInformation("Created job {JobId} ({JobType})", job.Id, job.Type);
-        }
-
-        // Fire-and-forget: 백그라운드 Task 실행
-        _ = Task.Run(async () =>
-        {
-            await ExecuteJobAsync(job.Id, CancellationToken.None);
-        });
-
+        context.Jobs.Add(job);
+        await context.SaveChangesAsync();
         return job;
     }
 
     // 작업 취소
+
     public bool CancelJob(Guid jobId)
     {
         var cancelled = _concurrencyManager.CancelJob(jobId);
-        
+
         if (cancelled)
         {
             _logger.LogInformation("Job {JobId} cancellation requested", jobId);
         }
-        
+
         return cancelled;
     }
 
@@ -82,7 +74,7 @@ public class JobExecutionService
     {
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        
+
         var job = await context.Jobs.FindAsync(jobId);
         if (job == null || job.Status != JobStatus.Pending)
         {
@@ -93,24 +85,17 @@ public class JobExecutionService
         job.CompletedAt = DateTime.UtcNow;
         job.ErrorMessage = "Cancelled by user before execution";
         await context.SaveChangesAsync();
-        
+
         _logger.LogInformation("Job {JobId} cancelled before execution", jobId);
         return true;
     }
 
     // 메인 실행 메서드 (내부용)
-    private async Task ExecuteJobAsync(Guid jobId, CancellationToken cancellationToken)
+    private async Task ExecuteJobAsync(string jobType, string payload, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        
-        var job = await context.Jobs.FindAsync(new object[] { jobId }, cancellationToken);
-        if (job == null)
-        {
-            _logger.LogWarning("Job {JobId} not found", jobId);
-            return;
-        }
-
+        var job = await InsertNewJobAsync(jobType, payload, scope);
         var config = _concurrencyManager.GetConfiguration(job.Type);
         if (config == null)
         {
@@ -121,7 +106,7 @@ public class JobExecutionService
             await context.SaveChangesAsync(CancellationToken.None);
             return;
         }
-
+        var jobId = job.Id;
         // CancellationTokenSource 등록
         var cts = _concurrencyManager.RegisterJob(jobId);
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token);
@@ -129,10 +114,10 @@ public class JobExecutionService
         try
         {
             _logger.LogInformation("Job {JobId} ({JobType}) waiting for semaphore...", jobId, job.Type);
-            
+
             // 세마포어 대기 (블로킹 - 슬롯 확보 시까지)
             await _concurrencyManager.AcquireAsync(job.Type, linkedCts.Token);
-            
+
             _logger.LogInformation("Job {JobId} ({JobType}) acquired semaphore, starting execution", jobId, job.Type);
 
             // 상태 업데이트: InProgress
@@ -169,7 +154,7 @@ public class JobExecutionService
             _concurrencyManager.Release(job.Type);
             _concurrencyManager.UnregisterJob(jobId);
             linkedCts.Dispose();
-            
+
             _logger.LogInformation("Job {JobId} ({JobType}) released semaphore", jobId, job.Type);
         }
     }
