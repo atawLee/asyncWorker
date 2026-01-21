@@ -8,6 +8,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 
+// Scoped Services
+builder.Services.AddScoped<ISampleService, SampleService>();
+
 // Singleton Services
 builder.Services.AddSingleton<ProcessInstanceManager>();
 builder.Services.AddSingleton<JobConcurrencyManager>();

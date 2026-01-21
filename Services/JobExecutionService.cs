@@ -126,8 +126,9 @@ public class JobExecutionService
             job.ProcessInstanceId = _processManager.CurrentInstanceId;
             await context.SaveChangesAsync(linkedCts.Token);
 
-            // 실제 작업 실행 (Task.Delay로 시뮬레이션)
-            await Task.Delay(config.DelayMilliseconds, linkedCts.Token);
+            // 실제 작업 실행 (Scoped 서비스를 통한 처리)
+            var sampleService = scope.ServiceProvider.GetRequiredService<ISampleService>();
+            await sampleService.ProcessAsync(config.DelayMilliseconds);
 
             // 완료 처리
             job.Status = JobStatus.Completed;
